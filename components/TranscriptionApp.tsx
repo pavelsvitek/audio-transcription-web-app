@@ -19,6 +19,87 @@ const MAX_COMMIT_SECONDS = 25;
 const MAX_COMMIT_SAMPLES = SAMPLE_RATE * MAX_COMMIT_SECONDS;
 const INFERENCE_INTERVAL_MS = 2500;
 const MIN_REMAINING_CHARS = 15;
+const MODEL_DOWNLOADED_STORAGE_KEY = "transcription:model-downloaded:v1";
+const MODEL_ID = "onnx-community/whisper-tiny.en";
+
+function readModelDownloadedFlag(): boolean {
+  if (typeof window === "undefined") return false;
+  try {
+    return window.localStorage.getItem(MODEL_DOWNLOADED_STORAGE_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
+
+function writeModelDownloadedFlag(isDownloaded: boolean): void {
+  if (typeof window === "undefined") return;
+  try {
+    if (isDownloaded) {
+      window.localStorage.setItem(MODEL_DOWNLOADED_STORAGE_KEY, "1");
+      return;
+    }
+    window.localStorage.removeItem(MODEL_DOWNLOADED_STORAGE_KEY);
+  } catch {
+    // Ignore localStorage errors (private mode, quota, etc.).
+  }
+}
+
+function modelCacheMatches(value: string): boolean {
+  const checks = [
+    MODEL_ID,
+    encodeURIComponent(MODEL_ID),
+    "onnx-community/whisper-tiny.en",
+    "onnx-community%2Fwhisper-tiny.en",
+    "whisper-tiny.en",
+    "huggingface.co",
+    "transformers",
+  ];
+  return checks.some((check) => value.includes(check));
+}
+
+async function clearDownloadedModelData(): Promise<void> {
+  if (typeof window === "undefined") return;
+
+  writeModelDownloadedFlag(false);
+
+  if ("caches" in window) {
+    const cacheNames = await window.caches.keys();
+    await Promise.all(
+      cacheNames.map(async (cacheName) => {
+        if (modelCacheMatches(cacheName)) {
+          await window.caches.delete(cacheName);
+          return;
+        }
+
+        const cache = await window.caches.open(cacheName);
+        const requests = await cache.keys();
+        await Promise.all(
+          requests.map(async (request) => {
+            if (modelCacheMatches(request.url)) {
+              await cache.delete(request);
+            }
+          }),
+        );
+      }),
+    );
+  }
+
+  if ("indexedDB" in window && "databases" in window.indexedDB) {
+    const databases = await window.indexedDB.databases();
+    await Promise.all(
+      databases.map(async (database) => {
+        const dbName = database.name;
+        if (!dbName || !modelCacheMatches(dbName)) return;
+        await new Promise<void>((resolve) => {
+          const request = window.indexedDB.deleteDatabase(dbName);
+          request.onsuccess = () => resolve();
+          request.onerror = () => resolve();
+          request.onblocked = () => resolve();
+        });
+      }),
+    );
+  }
+}
 
 /**
  * Find the last position where a sentence ends *internally* — i.e. a period,
@@ -70,6 +151,7 @@ function downsampleTo16k(input: Float32Array, inputRate: number) {
 export function TranscriptionApp() {
   const isDevMode = process.env.NODE_ENV !== "production";
   const [modelState, setModelState] = useState<"idle" | "loading" | "ready" | "error">("idle");
+  const [isModelSavedLocally, setIsModelSavedLocally] = useState(false);
   const [downloadProgress, setDownloadProgress] = useState(0);
   const [device, setDevice] = useState<"webgpu" | "wasm" | null>(null);
   const [isRecording, setIsRecording] = useState(false);
@@ -183,6 +265,15 @@ export function TranscriptionApp() {
       { type: "module" },
     );
     workerRef.current = worker;
+    const hasSavedModel = readModelDownloadedFlag();
+    setIsModelSavedLocally(hasSavedModel);
+
+    if (hasSavedModel) {
+      // If the model was previously downloaded, restore it from browser cache on load.
+      setModelState("loading");
+      setDownloadProgress(0);
+      worker.postMessage({ type: "LOAD_MODEL" });
+    }
 
     worker.onmessage = (event: MessageEvent<WorkerMessage>) => {
       const message = event.data;
@@ -200,6 +291,8 @@ export function TranscriptionApp() {
 
       if (message.status === "ready") {
         setModelState("ready");
+        setIsModelSavedLocally(true);
+        writeModelDownloadedFlag(true);
         setDevice(message.device);
         setError(null);
         setDownloadProgress(100);
@@ -268,6 +361,10 @@ export function TranscriptionApp() {
       if (message.status === "error") {
         setError(message.error);
         setModelState("error");
+        if (modelStateRef.current === "loading") {
+          setIsModelSavedLocally(false);
+          writeModelDownloadedFlag(false);
+        }
         workerBusyRef.current = false;
         setIsTranscribing(false);
       }
@@ -427,9 +524,21 @@ export function TranscriptionApp() {
     worker.postMessage({ type: "LOAD_MODEL" });
   };
 
-  const resetApp = () => {
+  const resetApp = async () => {
     stopAudioProcessing();
-    window.location.reload();
+    workerRef.current?.terminate();
+    workerRef.current = null;
+    setError(null);
+    setModelState("idle");
+    setIsModelSavedLocally(false);
+    setDownloadProgress(0);
+    setDevice(null);
+
+    try {
+      await clearDownloadedModelData();
+    } finally {
+      window.location.reload();
+    }
   };
 
   const seedTestTranscript = () => {
@@ -443,6 +552,7 @@ export function TranscriptionApp() {
 
   const statusLabel = useMemo(() => {
     if (error) return "Error";
+    if (modelState === "idle" && isModelSavedLocally) return "Model saved locally";
     if (modelState === "idle") return "Model not downloaded";
     if (modelState === "loading") return `Loading model (${Math.round(downloadProgress)}%)`;
     if (isRecording && isTranscribing) return "Recording + Transcribing";
@@ -450,7 +560,7 @@ export function TranscriptionApp() {
     if (isTranscribing) return "Transcribing";
     if (modelState === "ready") return "Ready";
     return "Idle";
-  }, [downloadProgress, error, isRecording, isTranscribing, modelState]);
+  }, [downloadProgress, error, isModelSavedLocally, isRecording, isTranscribing, modelState]);
 
   const statusTone = error
     ? "border-red-200 bg-red-50 text-red-700"
@@ -472,25 +582,28 @@ export function TranscriptionApp() {
         </p>
       </header>
 
-      <section className="grid gap-3 rounded-2xl border border-slate-200 bg-gradient-to-br from-slate-50 to-white p-5 md:grid-cols-3">
-        <article className="rounded-xl border border-slate-200 bg-white p-4">
-          <p className="text-sm font-semibold text-slate-900">100% on-device privacy</p>
-          <p className="mt-1 text-sm text-slate-600">
-            Your microphone audio stays in your browser session and is never sent to a server.
-          </p>
-        </article>
-        <article className="rounded-xl border border-slate-200 bg-white p-4">
-          <p className="text-sm font-semibold text-slate-900">Works with low latency</p>
-          <p className="mt-1 text-sm text-slate-600">
-            Once the model is downloaded, transcription runs locally for fast live feedback.
-          </p>
-        </article>
-        <article className="rounded-xl border border-slate-200 bg-white p-4">
-          <p className="text-sm font-semibold text-slate-900">No account required</p>
-          <p className="mt-1 text-sm text-slate-600">
-            Open the page, download the model, and start transcribing immediately.
-          </p>
-        </article>
+      <section className="rounded-2xl border border-slate-200 bg-gradient-to-br from-slate-50 to-white p-5">
+        <div className="text-lg font-semibold text-slate-900 mb-4">How this app works</div>
+        <div className="grid gap-3 md:grid-cols-3">
+          <article className="rounded-xl border border-slate-200 bg-white p-4">
+            <p className="text-sm font-semibold text-slate-900">100% on-device privacy</p>
+            <p className="mt-1 text-sm text-slate-600">
+              Your microphone audio stays in your browser session and is never sent to a server.
+            </p>
+          </article>
+          <article className="rounded-xl border border-slate-200 bg-white p-4">
+            <p className="text-sm font-semibold text-slate-900">Works with low latency</p>
+            <p className="mt-1 text-sm text-slate-600">
+              Once the model is downloaded, transcription runs locally for fast live feedback.
+            </p>
+          </article>
+          <article className="rounded-xl border border-slate-200 bg-white p-4">
+            <p className="text-sm font-semibold text-slate-900">No account required</p>
+            <p className="mt-1 text-sm text-slate-600">
+              Open the page, download the model, and start transcribing immediately.
+            </p>
+          </article>
+        </div>
       </section>
 
       <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-lg">
@@ -510,7 +623,9 @@ export function TranscriptionApp() {
               {modelState === "ready"
                 ? "Model downloaded"
                 : modelState === "loading"
-                  ? "Downloading model..."
+                  ? isModelSavedLocally
+                    ? "Loading saved model..."
+                    : "Downloading model..."
                   : "Download model"}
             </button>
             <button
@@ -541,7 +656,9 @@ export function TranscriptionApp() {
 
         {modelState === "idle" && (
           <p className="mb-5 rounded-lg border border-blue-200 bg-blue-50 px-3 py-2 text-xs text-blue-700">
-            Download the model once to enable offline-ready transcription in this browser.
+            {isModelSavedLocally
+              ? "Saved model detected. Click to load it and start transcribing."
+              : "Download the model once to enable offline-ready transcription in this browser."}
           </p>
         )}
 
