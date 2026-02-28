@@ -68,7 +68,7 @@ function downsampleTo16k(input: Float32Array, inputRate: number) {
 }
 
 export function TranscriptionApp() {
-  const [modelState, setModelState] = useState<"loading" | "ready" | "error">("loading");
+  const [modelState, setModelState] = useState<"idle" | "loading" | "ready" | "error">("idle");
   const [downloadProgress, setDownloadProgress] = useState(0);
   const [device, setDevice] = useState<"webgpu" | "wasm" | null>(null);
   const [isRecording, setIsRecording] = useState(false);
@@ -92,7 +92,7 @@ export function TranscriptionApp() {
   const isCapturingRef = useRef(false);
   const lastInferenceAtRef = useRef(0);
   const liveTextRef = useRef("");
-  const modelStateRef = useRef<"loading" | "ready" | "error">("loading");
+  const modelStateRef = useRef<"idle" | "loading" | "ready" | "error">("idle");
   const flushInferenceQueue = useCallback(() => {
     const worker = workerRef.current;
     if (!worker || modelStateRef.current !== "ready") return;
@@ -271,8 +271,6 @@ export function TranscriptionApp() {
       }
     };
 
-    worker.postMessage({ type: "LOAD_MODEL" });
-
     return () => {
       worker.terminate();
       stopAudioProcessing();
@@ -389,8 +387,18 @@ export function TranscriptionApp() {
     }
   };
 
+  const downloadModel = () => {
+    const worker = workerRef.current;
+    if (!worker || modelState === "loading" || modelState === "ready") return;
+    setError(null);
+    setDownloadProgress(0);
+    setModelState("loading");
+    worker.postMessage({ type: "LOAD_MODEL" });
+  };
+
   const statusLabel = useMemo(() => {
     if (error) return "Error";
+    if (modelState === "idle") return "Model not downloaded";
     if (modelState === "loading") return `Loading model (${Math.round(downloadProgress)}%)`;
     if (isRecording && isTranscribing) return "Recording + Transcribing";
     if (isRecording) return "Recording";
@@ -416,6 +424,27 @@ export function TranscriptionApp() {
         </p>
       </header>
 
+      <section className="grid gap-3 rounded-2xl border border-slate-200 bg-gradient-to-br from-slate-50 to-white p-5 md:grid-cols-3">
+        <article className="rounded-xl border border-slate-200 bg-white p-4">
+          <p className="text-sm font-semibold text-slate-900">100% on-device privacy</p>
+          <p className="mt-1 text-sm text-slate-600">
+            Your microphone audio stays in your browser session and is never sent to a server.
+          </p>
+        </article>
+        <article className="rounded-xl border border-slate-200 bg-white p-4">
+          <p className="text-sm font-semibold text-slate-900">Works with low latency</p>
+          <p className="mt-1 text-sm text-slate-600">
+            Once the model is downloaded, transcription runs locally for fast live feedback.
+          </p>
+        </article>
+        <article className="rounded-xl border border-slate-200 bg-white p-4">
+          <p className="text-sm font-semibold text-slate-900">No account required</p>
+          <p className="mt-1 text-sm text-slate-600">
+            Open the page, download the model, and start transcribing immediately.
+          </p>
+        </article>
+      </section>
+
       <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-lg">
         <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
           <span className={`rounded-full border px-3 py-1 text-xs font-medium ${statusTone}`}>
@@ -424,6 +453,18 @@ export function TranscriptionApp() {
           </span>
 
           <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={downloadModel}
+              disabled={modelState === "loading" || modelState === "ready"}
+              className="rounded-lg border border-slate-700 bg-slate-800 px-3 py-1.5 text-sm text-white transition hover:bg-slate-700 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              {modelState === "ready"
+                ? "Model downloaded"
+                : modelState === "loading"
+                  ? "Downloading model..."
+                  : "Download model"}
+            </button>
             <button
               type="button"
               onClick={copyTranscript}
@@ -456,6 +497,12 @@ export function TranscriptionApp() {
               />
             </div>
           </div>
+        )}
+
+        {modelState === "idle" && (
+          <p className="mb-5 rounded-lg border border-blue-200 bg-blue-50 px-3 py-2 text-xs text-blue-700">
+            Download the model once to enable offline-ready transcription in this browser.
+          </p>
         )}
 
         <div className="mb-5 flex items-center gap-3">
