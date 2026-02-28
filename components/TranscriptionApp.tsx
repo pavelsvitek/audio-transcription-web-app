@@ -13,20 +13,30 @@ type WorkerMessage =
 const SAMPLE_RATE = 16_000;
 const MAX_BUFFER_SECONDS = 12;
 const MAX_BUFFER_SAMPLES = SAMPLE_RATE * MAX_BUFFER_SECONDS;
-const SCRIPT_BUFFER_SIZE = 4096;
+// Audio kept as context when the rolling buffer resets after a sentence commit
+const OVERLAP_SECONDS = 2;
+const OVERLAP_SAMPLES = SAMPLE_RATE * OVERLAP_SECONDS;
+// Don't commit unless at least this much audio has passed since the last commit
+const MIN_COMMIT_SECONDS = 4;
+const MIN_COMMIT_SAMPLES = SAMPLE_RATE * MIN_COMMIT_SECONDS;
+// Force a commit after this much audio even without a sentence boundary
+const MAX_COMMIT_SECONDS = 25;
+const MAX_COMMIT_SAMPLES = SAMPLE_RATE * MAX_COMMIT_SECONDS;
 const INFERENCE_INTERVAL_MS = 2500;
 
-function appendToRollingBuffer(existing: Float32Array, incoming: Float32Array) {
+const SENTENCE_END_RE = /[.!?]\s*$/;
+
+function appendToBuffer(existing: Float32Array, incoming: Float32Array, maxSamples: number) {
   const totalLength = existing.length + incoming.length;
   const merged = new Float32Array(totalLength);
   merged.set(existing, 0);
   merged.set(incoming, existing.length);
 
-  if (merged.length <= MAX_BUFFER_SAMPLES) {
+  if (merged.length <= maxSamples) {
     return merged;
   }
 
-  return merged.slice(merged.length - MAX_BUFFER_SAMPLES);
+  return merged.slice(merged.length - maxSamples);
 }
 
 function downsampleTo16k(input: Float32Array, inputRate: number) {
@@ -57,12 +67,15 @@ export function TranscriptionApp() {
   const workerRef = useRef<Worker | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const sourceNodeRef = useRef<MediaStreamAudioSourceNode | null>(null);
-  const processorNodeRef = useRef<ScriptProcessorNode | null>(null);
+  const workletNodeRef = useRef<AudioWorkletNode | null>(null);
+  const workletLoadedRef = useRef(false);
   const audioContextRef = useRef<AudioContext | null>(null);
   const rollingBufferRef = useRef<Float32Array>(new Float32Array(0));
   const queuedInferenceRef = useRef(false);
   const workerBusyRef = useRef(false);
   const shouldFinalizeRef = useRef(false);
+  const totalSamplesRef = useRef(0);
+  const lastCommitSamplesRef = useRef(0);
   const isCapturingRef = useRef(false);
   const lastInferenceAtRef = useRef(0);
   const liveTextRef = useRef("");
@@ -94,11 +107,12 @@ export function TranscriptionApp() {
   }, []);
 
   const stopAudioProcessing = useCallback(() => {
-    const processorNode = processorNodeRef.current;
-    if (processorNode) {
-      processorNode.onaudioprocess = null;
-      processorNode.disconnect();
-      processorNodeRef.current = null;
+    const workletNode = workletNodeRef.current;
+    if (workletNode) {
+      workletNode.port.onmessage = null;
+      workletNode.port.close();
+      workletNode.disconnect();
+      workletNodeRef.current = null;
     }
 
     const sourceNode = sourceNodeRef.current;
@@ -183,10 +197,31 @@ export function TranscriptionApp() {
       }
 
       if (message.status === "complete") {
-        setLiveText(message.text);
-        liveTextRef.current = message.text;
         workerBusyRef.current = false;
         setIsTranscribing(false);
+
+        if (!shouldFinalizeRef.current) {
+          const samplesSinceCommit = totalSamplesRef.current - lastCommitSamplesRef.current;
+          const enoughAudio = samplesSinceCommit >= MIN_COMMIT_SAMPLES;
+          const overdue = samplesSinceCommit >= MAX_COMMIT_SAMPLES;
+          const atSentenceEnd = SENTENCE_END_RE.test(message.text);
+
+          if (enoughAudio && (atSentenceEnd || overdue)) {
+            lastCommitSamplesRef.current = totalSamplesRef.current;
+            const segmentText = message.text.trim();
+            if (segmentText) {
+              setCommittedText((prev) => (prev ? `${prev}\n\n${segmentText}` : segmentText));
+            }
+            rollingBufferRef.current = rollingBufferRef.current.slice(-OVERLAP_SAMPLES);
+            setLiveText("");
+            liveTextRef.current = "";
+            flushInferenceQueue();
+            return;
+          }
+        }
+
+        setLiveText(message.text);
+        liveTextRef.current = message.text;
         flushInferenceQueue();
 
         if (shouldFinalizeRef.current && !workerBusyRef.current && !queuedInferenceRef.current) {
@@ -228,6 +263,8 @@ export function TranscriptionApp() {
       setLiveText("");
       liveTextRef.current = "";
       shouldFinalizeRef.current = false;
+      totalSamplesRef.current = 0;
+      lastCommitSamplesRef.current = 0;
       queuedInferenceRef.current = false;
       workerBusyRef.current = false;
       isCapturingRef.current = false;
@@ -247,24 +284,40 @@ export function TranscriptionApp() {
       if (audioContext.state === "suspended") {
         await audioContext.resume();
       }
+      if (!workletLoadedRef.current) {
+        await audioContext.audioWorklet.addModule("/audio-capture-worklet.js");
+        workletLoadedRef.current = true;
+      }
 
       const sourceNode = audioContext.createMediaStreamSource(stream);
-      const processorNode = audioContext.createScriptProcessor(SCRIPT_BUFFER_SIZE, 1, 1);
+      const workletNode = new AudioWorkletNode(audioContext, "audio-capture-processor", {
+        numberOfInputs: 1,
+        numberOfOutputs: 0,
+        channelCount: 1,
+      });
 
-      processorNode.onaudioprocess = (event) => {
+      workletNode.port.onmessage = (
+        event: MessageEvent<{ type: "pcm"; data: Float32Array } | { type: "silence" }>,
+      ) => {
         if (!isCapturingRef.current) return;
 
-        const channelData = event.inputBuffer.getChannelData(0);
-        const sampled = downsampleTo16k(channelData, audioContext.sampleRate);
-        rollingBufferRef.current = appendToRollingBuffer(rollingBufferRef.current, sampled);
+        if (event.data.type === "silence") {
+          // Natural speech pause — trigger inference immediately so the sentence-end
+          // check fires while the text is still fresh at a sentence boundary.
+          queueInference();
+          return;
+        }
+
+        const sampled = downsampleTo16k(event.data.data, audioContext.sampleRate);
+        rollingBufferRef.current = appendToBuffer(rollingBufferRef.current, sampled, MAX_BUFFER_SAMPLES);
+        totalSamplesRef.current += sampled.length;
         maybeQueueInference();
       };
 
-      sourceNode.connect(processorNode);
-      processorNode.connect(audioContext.destination);
+      sourceNode.connect(workletNode);
 
       sourceNodeRef.current = sourceNode;
-      processorNodeRef.current = processorNode;
+      workletNodeRef.current = workletNode;
       isCapturingRef.current = true;
       lastInferenceAtRef.current = performance.now();
       setIsRecording(true);
@@ -286,6 +339,8 @@ export function TranscriptionApp() {
     setLiveText("");
     liveTextRef.current = "";
     rollingBufferRef.current = new Float32Array(0);
+    totalSamplesRef.current = 0;
+    lastCommitSamplesRef.current = 0;
   };
 
   const fullTranscript = useMemo(() => {
