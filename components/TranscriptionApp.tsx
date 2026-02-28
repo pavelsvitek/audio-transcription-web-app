@@ -401,9 +401,7 @@ export function TranscriptionApp() {
       "_blank",
       "noopener,noreferrer",
     );
-    if (!chatWindow) {
-      setError("Popup blocked. Please allow popups and try again.");
-    }
+
   };
 
   const openGeminiWithTranscript = async () => {
@@ -414,10 +412,6 @@ export function TranscriptionApp() {
     try {
       await navigator.clipboard.writeText(fullTranscript);
       const geminiWindow = window.open("https://gemini.google/", "_blank", "noopener,noreferrer");
-      if (!geminiWindow) {
-        setError("Popup blocked. Please allow popups and try again.");
-        return;
-      }
       setExportHint("Transcript copied. Switch to Gemini and press Cmd+V to paste.");
     } catch {
       setError("Clipboard copy failed. Try the Copy text button first.");
