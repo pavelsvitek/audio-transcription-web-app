@@ -11,8 +11,10 @@ type WorkerMessage =
   | { status: "error"; error: string };
 
 const SAMPLE_RATE = 16_000;
-const MAX_BUFFER_SECONDS = 30;
+const MAX_BUFFER_SECONDS = 12;
 const MAX_BUFFER_SAMPLES = SAMPLE_RATE * MAX_BUFFER_SECONDS;
+const SCRIPT_BUFFER_SIZE = 4096;
+const INFERENCE_INTERVAL_MS = 2500;
 
 function appendToRollingBuffer(existing: Float32Array, incoming: Float32Array) {
   const totalLength = existing.length + incoming.length;
@@ -42,17 +44,6 @@ function downsampleTo16k(input: Float32Array, inputRate: number) {
   return output;
 }
 
-function getRecorderMimeType() {
-  const candidates = [
-    "audio/webm;codecs=opus",
-    "audio/webm",
-    "audio/mp4",
-    "audio/ogg;codecs=opus",
-  ];
-
-  return candidates.find((mimeType) => MediaRecorder.isTypeSupported(mimeType));
-}
-
 export function TranscriptionApp() {
   const [modelState, setModelState] = useState<"loading" | "ready" | "error">("loading");
   const [downloadProgress, setDownloadProgress] = useState(0);
@@ -64,14 +55,16 @@ export function TranscriptionApp() {
   const [liveText, setLiveText] = useState("");
 
   const workerRef = useRef<Worker | null>(null);
-  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
+  const sourceNodeRef = useRef<MediaStreamAudioSourceNode | null>(null);
+  const processorNodeRef = useRef<ScriptProcessorNode | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
   const rollingBufferRef = useRef<Float32Array>(new Float32Array(0));
   const queuedInferenceRef = useRef(false);
   const workerBusyRef = useRef(false);
   const shouldFinalizeRef = useRef(false);
-  const pendingDecodeRef = useRef(0);
+  const isCapturingRef = useRef(false);
+  const lastInferenceAtRef = useRef(0);
   const liveTextRef = useRef("");
   const modelStateRef = useRef<"loading" | "ready" | "error">("loading");
   const flushInferenceQueue = useCallback(() => {
@@ -99,6 +92,39 @@ export function TranscriptionApp() {
     streamRef.current?.getTracks().forEach((track) => track.stop());
     streamRef.current = null;
   }, []);
+
+  const stopAudioProcessing = useCallback(() => {
+    const processorNode = processorNodeRef.current;
+    if (processorNode) {
+      processorNode.onaudioprocess = null;
+      processorNode.disconnect();
+      processorNodeRef.current = null;
+    }
+
+    const sourceNode = sourceNodeRef.current;
+    if (sourceNode) {
+      sourceNode.disconnect();
+      sourceNodeRef.current = null;
+    }
+
+    isCapturingRef.current = false;
+    stopMicrophoneTracks();
+  }, [stopMicrophoneTracks]);
+
+  const maybeQueueInference = useCallback(
+    (force = false) => {
+      if (force) {
+        queueInference();
+        return;
+      }
+
+      const now = performance.now();
+      if (now - lastInferenceAtRef.current < INFERENCE_INTERVAL_MS) return;
+      lastInferenceAtRef.current = now;
+      queueInference();
+    },
+    [queueInference],
+  );
 
   const finalizeRecording = useCallback(() => {
     const finalLiveText = liveTextRef.current.trim();
@@ -181,35 +207,16 @@ export function TranscriptionApp() {
 
     return () => {
       worker.terminate();
-      stopMicrophoneTracks();
+      stopAudioProcessing();
       audioContextRef.current?.close();
     };
-  }, [finalizeRecording, flushInferenceQueue, stopMicrophoneTracks]);
+  }, [finalizeRecording, flushInferenceQueue, stopAudioProcessing]);
 
   const getAudioContext = () => {
     if (!audioContextRef.current) {
       audioContextRef.current = new AudioContext();
     }
     return audioContextRef.current;
-  };
-
-  const decodeChunk = async (blob: Blob) => {
-    pendingDecodeRef.current += 1;
-    try {
-      const audioContext = getAudioContext();
-      const arrayBuffer = await blob.arrayBuffer();
-      const audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
-      const channelData = audioBuffer.getChannelData(0);
-      const sampled = downsampleTo16k(channelData, audioBuffer.sampleRate);
-
-      rollingBufferRef.current = appendToRollingBuffer(rollingBufferRef.current, sampled);
-      queueInference();
-    } finally {
-      pendingDecodeRef.current -= 1;
-      if (shouldFinalizeRef.current && pendingDecodeRef.current === 0) {
-        queueInference();
-      }
-    }
   };
 
   const startRecording = async () => {
@@ -223,7 +230,8 @@ export function TranscriptionApp() {
       shouldFinalizeRef.current = false;
       queuedInferenceRef.current = false;
       workerBusyRef.current = false;
-      pendingDecodeRef.current = 0;
+      isCapturingRef.current = false;
+      lastInferenceAtRef.current = 0;
 
       const stream = await navigator.mediaDevices.getUserMedia({
         audio: {
@@ -235,24 +243,30 @@ export function TranscriptionApp() {
       });
       streamRef.current = stream;
 
-      const mimeType = getRecorderMimeType();
-      const mediaRecorder = mimeType
-        ? new MediaRecorder(stream, { mimeType })
-        : new MediaRecorder(stream);
+      const audioContext = getAudioContext();
+      if (audioContext.state === "suspended") {
+        await audioContext.resume();
+      }
 
-      mediaRecorder.ondataavailable = (event) => {
-        if (event.data.size > 0) {
-          void decodeChunk(event.data);
-        }
+      const sourceNode = audioContext.createMediaStreamSource(stream);
+      const processorNode = audioContext.createScriptProcessor(SCRIPT_BUFFER_SIZE, 1, 1);
+
+      processorNode.onaudioprocess = (event) => {
+        if (!isCapturingRef.current) return;
+
+        const channelData = event.inputBuffer.getChannelData(0);
+        const sampled = downsampleTo16k(channelData, audioContext.sampleRate);
+        rollingBufferRef.current = appendToRollingBuffer(rollingBufferRef.current, sampled);
+        maybeQueueInference();
       };
 
-      mediaRecorder.onstop = () => {
-        stopMicrophoneTracks();
-        queueInference();
-      };
+      sourceNode.connect(processorNode);
+      processorNode.connect(audioContext.destination);
 
-      mediaRecorderRef.current = mediaRecorder;
-      mediaRecorder.start(3000);
+      sourceNodeRef.current = sourceNode;
+      processorNodeRef.current = processorNode;
+      isCapturingRef.current = true;
+      lastInferenceAtRef.current = performance.now();
       setIsRecording(true);
     } catch (recordError) {
       const message = recordError instanceof Error ? recordError.message : String(recordError);
@@ -261,11 +275,10 @@ export function TranscriptionApp() {
   };
 
   const stopRecording = () => {
-    const recorder = mediaRecorderRef.current;
-    if (!recorder || recorder.state === "inactive") return;
+    if (!isCapturingRef.current) return;
     shouldFinalizeRef.current = true;
-    recorder.stop();
-    queueInference();
+    stopAudioProcessing();
+    maybeQueueInference(true);
   };
 
   const clearTranscript = () => {

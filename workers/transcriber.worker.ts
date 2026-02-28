@@ -94,8 +94,8 @@ ctx.addEventListener("message", async (event: MessageEvent<WorkerRequest>) => {
       ctx.postMessage({ status: "transcribing" } satisfies WorkerResponse);
 
       const result = await transcriber(event.data.payload, {
-        chunk_length_s: 30,
-        stride_length_s: 5,
+        chunk_length_s: 10,
+        stride_length_s: 2,
         return_timestamps: false,
       });
       const text = Array.isArray(result)
