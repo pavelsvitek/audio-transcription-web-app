@@ -6,8 +6,8 @@ class AudioCaptureProcessor extends AudioWorkletProcessor {
     this._silenceFramesRequired = Math.ceil((sampleRate * 0.5) / 128);
     // Minimum speaking frames before a silence event fires (~0.3 s of speech first)
     this._speechFramesRequired = Math.ceil((sampleRate * 0.3) / 128);
-    // Cooldown after firing: don't fire again for ~3 s
-    this._cooldownFramesRequired = Math.ceil((sampleRate * 3) / 128);
+    // Cooldown after firing: don't fire again for ~5 s
+    this._cooldownFramesRequired = Math.ceil((sampleRate * 5) / 128);
 
     this._silenceFrames = 0;
     this._speechFrames = 0;

@@ -11,20 +11,33 @@ type WorkerMessage =
   | { status: "error"; error: string };
 
 const SAMPLE_RATE = 16_000;
-const MAX_BUFFER_SECONDS = 12;
+const MAX_BUFFER_SECONDS = 28;
 const MAX_BUFFER_SAMPLES = SAMPLE_RATE * MAX_BUFFER_SECONDS;
-// Audio kept as context when the rolling buffer resets after a sentence commit
-const OVERLAP_SECONDS = 2;
-const OVERLAP_SAMPLES = SAMPLE_RATE * OVERLAP_SECONDS;
-// Don't commit unless at least this much audio has passed since the last commit
-const MIN_COMMIT_SECONDS = 4;
+const MIN_COMMIT_SECONDS = 10;
 const MIN_COMMIT_SAMPLES = SAMPLE_RATE * MIN_COMMIT_SECONDS;
-// Force a commit after this much audio even without a sentence boundary
 const MAX_COMMIT_SECONDS = 25;
 const MAX_COMMIT_SAMPLES = SAMPLE_RATE * MAX_COMMIT_SECONDS;
 const INFERENCE_INTERVAL_MS = 2500;
+const MIN_REMAINING_CHARS = 15;
 
-const SENTENCE_END_RE = /[.!?]\s*$/;
+/**
+ * Find the last position where a sentence ends *internally* — i.e. a period,
+ * exclamation, or question mark followed by enough remaining text that we're
+ * confident it's a real boundary (not just Whisper's trailing punctuation).
+ * Returns the character index to split at, or -1 if none found.
+ */
+function findInternalSentenceSplit(text: string): number {
+  const re = /[.!?]["'']?\s+/g;
+  let lastSplitPos = -1;
+  let match;
+  while ((match = re.exec(text)) !== null) {
+    const candidatePos = match.index + match[0].length;
+    if (text.slice(candidatePos).trim().length >= MIN_REMAINING_CHARS) {
+      lastSplitPos = candidatePos;
+    }
+  }
+  return lastSplitPos;
+}
 
 function appendToBuffer(existing: Float32Array, incoming: Float32Array, maxSamples: number) {
   const totalLength = existing.length + incoming.length;
@@ -204,18 +217,38 @@ export function TranscriptionApp() {
           const samplesSinceCommit = totalSamplesRef.current - lastCommitSamplesRef.current;
           const enoughAudio = samplesSinceCommit >= MIN_COMMIT_SAMPLES;
           const overdue = samplesSinceCommit >= MAX_COMMIT_SAMPLES;
-          const atSentenceEnd = SENTENCE_END_RE.test(message.text);
+          const text = message.text.trim();
+          const splitPos = findInternalSentenceSplit(text);
 
-          if (enoughAudio && (atSentenceEnd || overdue)) {
-            lastCommitSamplesRef.current = totalSamplesRef.current;
-            const segmentText = message.text.trim();
-            if (segmentText) {
-              setCommittedText((prev) => (prev ? `${prev}\n\n${segmentText}` : segmentText));
+          if (enoughAudio && splitPos > 0) {
+            const committable = text.slice(0, splitPos).trim();
+            const remaining = text.slice(splitPos).trim();
+
+            if (committable) {
+              setCommittedText((prev) => (prev ? `${prev}\n\n${committable}` : committable));
             }
-            rollingBufferRef.current = rollingBufferRef.current.slice(-OVERLAP_SAMPLES);
+
+            const ratio = splitPos / text.length;
+            const samplesToKeep = Math.ceil(
+              rollingBufferRef.current.length * (1 - ratio),
+            );
+            rollingBufferRef.current = rollingBufferRef.current.slice(-samplesToKeep);
+            lastCommitSamplesRef.current = totalSamplesRef.current;
+            queuedInferenceRef.current = false;
+            lastInferenceAtRef.current = performance.now();
+            setLiveText(remaining);
+            liveTextRef.current = remaining;
+            return;
+          }
+
+          if (overdue && text) {
+            setCommittedText((prev) => (prev ? `${prev}\n\n${text}` : text));
+            rollingBufferRef.current = new Float32Array(0);
+            lastCommitSamplesRef.current = totalSamplesRef.current;
+            queuedInferenceRef.current = false;
+            lastInferenceAtRef.current = performance.now();
             setLiveText("");
             liveTextRef.current = "";
-            flushInferenceQueue();
             return;
           }
         }
@@ -430,11 +463,10 @@ export function TranscriptionApp() {
             type="button"
             onClick={isRecording ? stopRecording : startRecording}
             disabled={modelState !== "ready"}
-            className={`relative inline-flex h-14 w-14 items-center justify-center rounded-full border text-2xl transition ${
-              isRecording
-                ? "border-red-300 bg-red-500/80 text-white shadow-lg shadow-red-500/30"
-                : "border-white/20 bg-zinc-800 text-zinc-100 hover:border-white/40"
-            } disabled:cursor-not-allowed disabled:opacity-50`}
+            className={`relative inline-flex h-14 w-14 items-center justify-center rounded-full border text-2xl transition ${isRecording
+              ? "border-red-300 bg-red-500/80 text-white shadow-lg shadow-red-500/30"
+              : "border-white/20 bg-zinc-800 text-zinc-100 hover:border-white/40"
+              } disabled:cursor-not-allowed disabled:opacity-50`}
           >
             {isRecording && <span className="absolute inset-0 rounded-full animate-ping bg-red-400/40" />}
             <span className="relative">{isRecording ? "■" : "🎙"}</span>
@@ -451,16 +483,14 @@ export function TranscriptionApp() {
             <p className="text-sm text-zinc-500">Your transcription will appear here...</p>
           ) : (
             <>
-              {committedText && (
-                <p className="whitespace-pre-wrap text-sm leading-6 text-zinc-100">
-                  {committedText}
-                </p>
-              )}
-              {liveText && (
-                <p className="mt-3 whitespace-pre-wrap text-sm leading-6 text-zinc-400">
-                  {liveText}
-                </p>
-              )}
+              <p className="text-sm leading-6 text-zinc-100">
+                {committedText || ''}
+                {liveText && (
+                  <span className="text-zinc-400 ml-1">
+                    {liveText}
+                  </span>
+                )}
+              </p>
             </>
           )}
         </div>
