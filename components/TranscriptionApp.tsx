@@ -400,23 +400,23 @@ export function TranscriptionApp() {
   }, [downloadProgress, error, isRecording, isTranscribing, modelState]);
 
   const statusTone = error
-    ? "border-red-400/40 bg-red-500/20 text-red-100"
+    ? "border-red-200 bg-red-50 text-red-700"
     : modelState === "ready"
-      ? "border-emerald-400/30 bg-emerald-500/20 text-emerald-100"
-      : "border-sky-400/30 bg-sky-500/20 text-sky-100";
+      ? "border-emerald-200 bg-emerald-50 text-emerald-700"
+      : "border-slate-200 bg-slate-50 text-slate-600";
 
   return (
     <div className="mx-auto flex min-h-screen w-full max-w-4xl flex-col gap-6 px-6 py-10">
       <header className="space-y-3">
-        <h1 className="text-3xl font-semibold tracking-tight text-white">
+        <h1 className="text-3xl font-semibold tracking-tight text-slate-900">
           In-Browser Voice Transcription
         </h1>
-        <p className="text-sm text-zinc-300">
+        <p className="text-sm text-slate-600">
           Private, local speech-to-text powered by Whisper Tiny. Audio never leaves your device.
         </p>
       </header>
 
-      <section className="rounded-2xl border border-white/10 bg-zinc-900/80 p-5 shadow-xl backdrop-blur">
+      <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-lg">
         <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
           <span className={`rounded-full border px-3 py-1 text-xs font-medium ${statusTone}`}>
             {statusLabel}
@@ -428,7 +428,7 @@ export function TranscriptionApp() {
               type="button"
               onClick={copyTranscript}
               disabled={!fullTranscript}
-              className="rounded-lg border border-white/15 px-3 py-1.5 text-sm text-zinc-100 transition hover:border-white/30 disabled:cursor-not-allowed disabled:opacity-40"
+              className="rounded-lg border border-slate-300 bg-slate-50 px-3 py-1.5 text-sm text-slate-700 transition hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-40"
             >
               Copy
             </button>
@@ -436,7 +436,7 @@ export function TranscriptionApp() {
               type="button"
               onClick={clearTranscript}
               disabled={!fullTranscript}
-              className="rounded-lg border border-white/15 px-3 py-1.5 text-sm text-zinc-100 transition hover:border-white/30 disabled:cursor-not-allowed disabled:opacity-40"
+              className="rounded-lg border border-slate-300 bg-slate-50 px-3 py-1.5 text-sm text-slate-700 transition hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-40"
             >
               Clear
             </button>
@@ -445,13 +445,13 @@ export function TranscriptionApp() {
 
         {modelState === "loading" && (
           <div className="mb-5">
-            <div className="mb-1 flex items-center justify-between text-xs text-zinc-300">
+            <div className="mb-1 flex items-center justify-between text-xs text-slate-500">
               <span>Downloading model artifacts</span>
               <span>{Math.round(downloadProgress)}%</span>
             </div>
-            <div className="h-2 w-full rounded-full bg-zinc-700">
+            <div className="h-2 w-full rounded-full bg-slate-200">
               <div
-                className="h-2 rounded-full bg-sky-400 transition-all"
+                className="h-2 rounded-full bg-slate-500 transition-all"
                 style={{ width: `${Math.max(3, downloadProgress)}%` }}
               />
             </div>
@@ -464,29 +464,29 @@ export function TranscriptionApp() {
             onClick={isRecording ? stopRecording : startRecording}
             disabled={modelState !== "ready"}
             className={`relative inline-flex h-14 w-14 items-center justify-center rounded-full border text-2xl transition ${isRecording
-              ? "border-red-300 bg-red-500/80 text-white shadow-lg shadow-red-500/30"
-              : "border-white/20 bg-zinc-800 text-zinc-100 hover:border-white/40"
+              ? "border-red-200 bg-red-500 text-white shadow-md shadow-red-200"
+              : "border-slate-700 bg-slate-800 text-white hover:bg-slate-700"
               } disabled:cursor-not-allowed disabled:opacity-50`}
           >
-            {isRecording && <span className="absolute inset-0 rounded-full animate-ping bg-red-400/40" />}
+            {isRecording && <span className="absolute inset-0 rounded-full animate-ping bg-red-300/60" />}
             <span className="relative">{isRecording ? "■" : "🎙"}</span>
           </button>
-          <div className="text-sm text-zinc-300">
+          <div className="text-sm text-slate-600">
             {isRecording
               ? "Listening live. Press stop to finalize this segment."
               : "Press the microphone to begin real-time transcription."}
           </div>
         </div>
 
-        <div className="h-80 overflow-y-auto rounded-xl border border-white/10 bg-black/40 p-4">
+        <div className="h-80 overflow-y-auto rounded-xl border border-slate-200 bg-slate-50 p-4">
           {!committedText && !liveText ? (
-            <p className="text-sm text-zinc-500">Your transcription will appear here...</p>
+            <p className="text-sm text-slate-400">Your transcription will appear here...</p>
           ) : (
             <>
-              <p className="text-sm leading-6 text-zinc-100">
+              <p className="text-sm leading-6 text-slate-700">
                 {committedText || ''}
                 {liveText && (
-                  <span className="text-zinc-400 ml-1">
+                  <span className="ml-1 text-slate-400">
                     {liveText}
                   </span>
                 )}
@@ -495,7 +495,7 @@ export function TranscriptionApp() {
           )}
         </div>
 
-        {error && <p className="mt-4 text-sm text-red-300">{error}</p>}
+        {error && <p className="mt-4 text-sm text-red-600">{error}</p>}
       </section>
     </div>
   );
