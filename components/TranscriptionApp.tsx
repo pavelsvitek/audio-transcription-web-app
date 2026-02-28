@@ -75,6 +75,7 @@ export function TranscriptionApp() {
   const [isRecording, setIsRecording] = useState(false);
   const [isTranscribing, setIsTranscribing] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [exportHint, setExportHint] = useState<string | null>(null);
   const [committedText, setCommittedText] = useState("");
   const [liveText, setLiveText] = useState("");
 
@@ -381,10 +382,45 @@ export function TranscriptionApp() {
 
   const copyTranscript = async () => {
     if (!fullTranscript) return;
+    setExportHint(null);
     try {
       await navigator.clipboard.writeText(fullTranscript);
     } catch {
       setError("Clipboard copy failed. Try selecting text manually.");
+    }
+  };
+
+  const openChatGptWithTranscript = () => {
+    if (!fullTranscript) return;
+    setError(null);
+    setExportHint(null);
+
+    const params = new URLSearchParams({ q: fullTranscript });
+    const chatWindow = window.open(
+      `https://chat.openai.com/?${params.toString()}`,
+      "_blank",
+      "noopener,noreferrer",
+    );
+    if (!chatWindow) {
+      setError("Popup blocked. Please allow popups and try again.");
+    }
+  };
+
+  const openGeminiWithTranscript = async () => {
+    if (!fullTranscript) return;
+    setError(null);
+    setExportHint(null);
+
+    try {
+      await navigator.clipboard.writeText(fullTranscript);
+      const geminiWindow = window.open("https://gemini.google/", "_blank", "noopener,noreferrer");
+      if (!geminiWindow) {
+        setError("Popup blocked. Please allow popups and try again.");
+        return;
+      }
+      setExportHint("Transcript copied. Switch to Gemini and press Cmd+V to paste.");
+    } catch {
+      setError("Clipboard copy failed. Try the Copy text button first.");
     }
   };
 
@@ -400,6 +436,15 @@ export function TranscriptionApp() {
   const resetApp = () => {
     stopAudioProcessing();
     window.location.reload();
+  };
+
+  const seedTestTranscript = () => {
+    setError(null);
+    setCommittedText(
+      "This is a test transcript generated from the DEV toolbar.\n\nUse this sample text to verify Copy, ChatGPT, and Gemini export flows without recording audio.",
+    );
+    setLiveText("");
+    liveTextRef.current = "";
   };
 
   const statusLabel = useMemo(() => {
@@ -476,14 +521,6 @@ export function TranscriptionApp() {
             </button>
             <button
               type="button"
-              onClick={copyTranscript}
-              disabled={!fullTranscript}
-              className="rounded-lg border border-slate-300 bg-slate-50 px-3 py-1.5 text-sm text-slate-700 transition hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-40"
-            >
-              Copy
-            </button>
-            <button
-              type="button"
               onClick={clearTranscript}
               disabled={!fullTranscript}
               className="rounded-lg border border-slate-300 bg-slate-50 px-3 py-1.5 text-sm text-slate-700 transition hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-40"
@@ -534,6 +571,13 @@ export function TranscriptionApp() {
           </div>
         </div>
 
+        <div className="mb-2 flex items-center justify-between">
+          <h2 className="text-sm font-semibold text-slate-900">Transcript</h2>
+          <span className="text-xs text-slate-400">
+            {fullTranscript ? `${fullTranscript.length} chars` : "No text yet"}
+          </span>
+        </div>
+
         <div className="h-80 overflow-y-auto rounded-xl border border-slate-200 bg-slate-50 p-4">
           {!committedText && !liveText ? (
             <p className="text-sm text-slate-400">Your transcription will appear here...</p>
@@ -551,13 +595,54 @@ export function TranscriptionApp() {
           )}
         </div>
 
-        {error && <p className="mt-4 text-sm text-red-600">{error}</p>}
+        <section className="mt-4 rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
+          <div className="flex items-center justify-between gap-3">
+            <h2 className="text-sm font-semibold text-slate-900">Export</h2>
+            <p className="text-xs text-slate-500">Share the current transcript quickly.</p>
+          </div>
+          <div className="mt-3 flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              onClick={copyTranscript}
+              disabled={!fullTranscript}
+              className="rounded-lg border border-slate-300 bg-slate-50 px-3 py-1.5 text-sm text-slate-700 transition hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              Copy text
+            </button>
+            <button
+              type="button"
+              onClick={openChatGptWithTranscript}
+              disabled={!fullTranscript}
+              className="rounded-lg border border-emerald-700 bg-emerald-800 px-3 py-1.5 text-sm text-white transition hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              Open ChatGPT
+            </button>
+            <button
+              type="button"
+              onClick={openGeminiWithTranscript}
+              disabled={!fullTranscript}
+              className="rounded-lg border border-blue-700 bg-blue-800 px-3 py-1.5 text-sm text-white transition hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              Open Gemini
+            </button>
+          </div>
+        </section>
+
+        {exportHint && <p className="mt-4 text-sm text-slate-600">{exportHint}</p>}
+        {error && <p className="mt-2 text-sm text-red-600">{error}</p>}
       </section>
 
       {isDevMode && (
         <section className="fixed inset-x-0 bottom-4 z-50 flex justify-center px-4">
           <div className="flex items-center gap-3 rounded-full border border-amber-300 bg-amber-50 px-4 py-2 shadow-lg">
             <span className="text-xs font-medium text-amber-800">DEV toolbar</span>
+            <button
+              type="button"
+              onClick={seedTestTranscript}
+              className="rounded-md border border-amber-500 bg-amber-100 px-3 py-1.5 text-xs font-medium text-amber-900 transition hover:bg-amber-200"
+            >
+              Seed transcript
+            </button>
             <button
               type="button"
               onClick={resetApp}
