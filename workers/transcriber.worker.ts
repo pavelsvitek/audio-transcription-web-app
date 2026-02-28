@@ -32,6 +32,24 @@ const createAsrPipeline = pipeline as unknown as (
 
 env.allowLocalModels = false;
 
+async function isWebGpuUsable(): Promise<boolean> {
+  if (typeof navigator === "undefined" || !("gpu" in navigator)) {
+    return false;
+  }
+
+  try {
+    const gpu = (navigator as Navigator & { gpu?: { requestAdapter?: () => Promise<unknown> } }).gpu;
+    if (!gpu?.requestAdapter) {
+      return false;
+    }
+
+    const adapter = await gpu.requestAdapter();
+    return adapter != null;
+  } catch {
+    return false;
+  }
+}
+
 async function initTranscriber() {
   if (transcriber) return;
   if (loadPromise) return loadPromise;
@@ -39,8 +57,8 @@ async function initTranscriber() {
   ctx.postMessage({ status: "loading" } satisfies WorkerResponse);
 
   loadPromise = (async () => {
-    const hasWebGPU = typeof navigator !== "undefined" && "gpu" in navigator;
-    const tryDevice = hasWebGPU ? (["webgpu", "wasm"] as const) : (["wasm"] as const);
+    const hasUsableWebGpu = await isWebGpuUsable();
+    const tryDevice = hasUsableWebGpu ? (["webgpu", "wasm"] as const) : (["wasm"] as const);
     let lastError: unknown = null;
 
     for (const device of tryDevice) {
