@@ -68,6 +68,7 @@ function downsampleTo16k(input: Float32Array, inputRate: number) {
 }
 
 export function TranscriptionApp() {
+  const isDevMode = process.env.NODE_ENV !== "production";
   const [modelState, setModelState] = useState<"idle" | "loading" | "ready" | "error">("idle");
   const [downloadProgress, setDownloadProgress] = useState(0);
   const [device, setDevice] = useState<"webgpu" | "wasm" | null>(null);
@@ -396,6 +397,11 @@ export function TranscriptionApp() {
     worker.postMessage({ type: "LOAD_MODEL" });
   };
 
+  const resetApp = () => {
+    stopAudioProcessing();
+    window.location.reload();
+  };
+
   const statusLabel = useMemo(() => {
     if (error) return "Error";
     if (modelState === "idle") return "Model not downloaded";
@@ -414,7 +420,10 @@ export function TranscriptionApp() {
       : "border-slate-200 bg-slate-50 text-slate-600";
 
   return (
-    <div className="mx-auto flex min-h-screen w-full max-w-4xl flex-col gap-6 px-6 py-10">
+    <div
+      className={`mx-auto flex min-h-screen w-full max-w-4xl flex-col gap-6 px-6 py-10 ${isDevMode ? "pb-28" : ""
+        }`}
+    >
       <header className="space-y-3">
         <h1 className="text-3xl font-semibold tracking-tight text-slate-900">
           In-Browser Voice Transcription
@@ -544,6 +553,21 @@ export function TranscriptionApp() {
 
         {error && <p className="mt-4 text-sm text-red-600">{error}</p>}
       </section>
+
+      {isDevMode && (
+        <section className="fixed inset-x-0 bottom-4 z-50 flex justify-center px-4">
+          <div className="flex items-center gap-3 rounded-full border border-amber-300 bg-amber-50 px-4 py-2 shadow-lg">
+            <span className="text-xs font-medium text-amber-800">DEV toolbar</span>
+            <button
+              type="button"
+              onClick={resetApp}
+              className="rounded-md border border-amber-700 bg-amber-800 px-3 py-1.5 text-xs font-medium text-white transition hover:bg-amber-700"
+            >
+              Reset app
+            </button>
+          </div>
+        </section>
+      )}
     </div>
   );
 }
